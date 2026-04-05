@@ -46,11 +46,10 @@ Parent repo:
 ```
 deploy/nginx/             # Infra nginx (prod + local)
 scripts/
-├── bootstrap.sh          # Volume, network, nginx files, hosts (dev)
-├── bootstrap-nginx-only.sh
-├── up-stack-dev.sh
-└── up-stack-prod.sh
+└── bootstrap.sh          # One-time / repeat: volume, network, nginx copies, optional hosts (--dev)
 ```
+
+Re-run `bootstrap.sh` anytime to refresh nginx files under `/opt/nginx` (volume and network steps are skipped if they already exist).
 
 ### 2.3 Docker — production
 
@@ -115,22 +114,14 @@ Same convention as Crator:
 
 ---
 
-## 5. Bootstrap scripts
+## 5. Bootstrap (`scripts/bootstrap.sh`)
 
-### 5.1 `scripts/bootstrap.sh`
+Single script: creates **`fundose-backend-postgres`** volume and **`infra_net`** if missing, ensures `/opt/nginx/snippets`, copies **`_fundose-locations.conf`** and the server conf (prod or dev), and with **`--dev`** appends **`fundose.local`** to `/etc/hosts` when needed.
 
 ```bash
 bash scripts/bootstrap.sh           # prod: fundose.in.conf + volume + network + snippet
-bash scripts/bootstrap.sh --dev     # dev: fundose.local.conf + hosts entry + volume + network + snippet
+bash scripts/bootstrap.sh --dev   # dev: fundose.local.conf + hosts + volume + network + snippet
 ```
-
-### 5.2 `scripts/bootstrap-nginx-only.sh`
-
-Refreshes only nginx files under `/opt/nginx` after you edit `deploy/nginx/*` (no volume/network).
-
-### 5.3 `scripts/up-stack-dev.sh` / `scripts/up-stack-prod.sh`
-
-Brings up **both** submodules with the matching compose files (expects `.env` in `fundose-backend` and bootstrap already run for prod/dev as appropriate).
 
 ---
 
@@ -152,7 +143,8 @@ cp .env.example .env
 # From monorepo root
 bash scripts/bootstrap.sh --dev
 cd fundose-backend && cp -n .env.example .env && cd ..
-bash scripts/up-stack-dev.sh
+cd fundose-backend && docker compose -f docker-compose.dev.yml up --build -d && cd ..
+cd fundose-fe && docker compose -f docker-compose.dev.yml up --build -d && cd ..
 # Reload infra nginx: nginx -t && nginx -s reload
 # Open http://fundose.local
 ```
@@ -164,7 +156,7 @@ bash scripts/up-stack-dev.sh
 3. Ensure infra nginx mounts `/opt/nginx` correctly.
 4. `fundose-backend`: `.env` with production secrets.
 5. `fundose-fe`: image built with `NEXT_PUBLIC_API_BASE_URL=""` (default in `docker-compose.yml`) so the browser calls same-origin paths (`/auth/`, …).
-6. `bash scripts/up-stack-prod.sh`
+6. `cd fundose-backend && docker compose up --build -d` then `cd fundose-fe && docker compose up --build -d`
 7. `nginx -t` && `nginx -s reload` on infra.
 
 ---
@@ -207,6 +199,7 @@ cd fundose-fe && docker compose up --build -d
 | `fundose-backend/scripts/entrypoint.sh` | Wait for Postgres → migrate → collectstatic |
 | `fundose-fe/Dockerfile` | Next standalone prod |
 | `fundose-fe/Dockerfile.dev` | Next dev server |
+| `scripts/bootstrap.sh` | Volume, `infra_net`, nginx file copies, optional `/etc/hosts` |
 
 ---
 
