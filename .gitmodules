@@ -1,0 +1,6 @@
+[submodule "fundose-backend"]
+	path = fundose-backend
+	url = https://github.com/sirajalam049/fundose-backend.git
+[submodule "fundose-fe"]
+	path = fundose-fe
+	url = https://github.com/sirajalam049/fundose-fe.git
