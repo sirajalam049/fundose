@@ -1,15 +1,15 @@
 # Fundose — DevOps
 
-**Purpose:** Deployment context, architecture, and operations (aligned with [Crator Labs DEVOPS](../crator-labs/DEVOPS.md) patterns).
+**Purpose:** Deployment context for **fundose.in** (Next.js) and **api.fundose.in** (Django) on separate subdomains with **separate TLS certificates**.
 
 ---
 
 ## 1. Projects overview
 
-| Project | Path | Stack | Prod container | Internal port |
-|--------|------|-------|----------------|---------------|
-| **fundose-backend** | `fundose-backend/` | Django 4, Gunicorn, PostgreSQL 16, Redis 7 | `fundose-backend` | 8000 |
-| **fundose-fe** | `fundose-fe/` | Next.js 12 (Pages), standalone Node image | `fundose-fe` | 3000 |
+| Project | Path | Public host | Container | Internal port |
+|--------|------|-------------|-----------|---------------|
+| **fundose-fe** | `fundose-fe/` | **fundose.in** | `fundose-fe` | 3000 |
+| **fundose-backend** | `fundose-backend/` | **api.fundose.in** | `fundose-backend` | 8000 |
 
 Submodules of parent repo `fundose`. After clone: `git submodule update --init --recursive`.
 
@@ -17,197 +17,94 @@ Submodules of parent repo `fundose`. After clone: `git submodule update --init -
 
 ## 2. Architecture
 
-### 2.1 How it connects
-
 ```
 Internet
-  │
-  └── fundose.in ─────────────► infra nginx (TLS termination)
-                                    ├── /auth, /players, /quiz, /admin, /static → fundose-backend:8000
-                                    ├── /_next/* → fundose-fe:3000
-                                    └── / → fundose-fe:3000
+  ├── fundose.in      ──► infra nginx ──► fundose-fe:3000
+  └── api.fundose.in  ──► infra nginx ──► fundose-backend:8000   (all paths → Gunicorn)
 ```
 
-All app containers attach to **`infra_net`**. Infra nginx resolves them by name (`resolver 127.0.0.11`), same as Crator Labs.
-
-### 2.2 Per-repo layout
-
-```
-fundose-backend/ / fundose-fe/
-├── Dockerfile              # Production image
-├── Dockerfile.dev        # Dev (hot reload)
-├── docker-compose.yml    # Prod: joins infra_net, external volume
-├── docker-compose.dev.yml
-└── scripts/              # Backend only: entrypoint.sh
-```
-
-Parent repo:
-
-```
-deploy/nginx/             # Infra nginx (prod + local)
-scripts/
-└── bootstrap.sh          # One-time / repeat: volume, network, nginx copies, optional hosts (--dev)
-```
-
-Re-run `bootstrap.sh` anytime to refresh nginx files under `/opt/nginx` (volume and network steps are skipped if they already exist).
-
-### 2.3 Docker — production
-
-| Service | Image flow | Container | Published host port |
-|---------|------------|-----------|---------------------|
-| **fundose-backend** | Multi-stage Python 3.10-slim; Gunicorn | `fundose-backend` | None (only `5434:5432` on Postgres) |
-| **fundose-fe** | Multi-stage Node 18 Alpine; `next build` + standalone | `fundose-fe` | None |
-
-Postgres data: **external** named volume `fundose-backend-postgres` (created by `scripts/bootstrap.sh`).
-
-### 2.4 Docker — development
-
-| Service | Dockerfile.dev | Container | App port | Hot reload |
-|---------|----------------|-----------|----------|------------|
-| **fundose-backend** | Python 3.10, `runserver` | `fundose-backend-dev` | 8000 | Source bind-mount |
-| **fundose-fe** | Node 18, `next dev` | `fundose-fe-dev` | 3000 | Source + `node_modules` volume |
-
-Access via **`http://fundose.local`** once infra nginx is configured (not raw `localhost:3000`), mirroring Crator’s `.local` workflow.
+- **Two Let’s Encrypt certificates:** `fundose.in` (and `www`) · `api.fundose.in`
+- Nginx vhosts live **in each repo** under `deploy/nginx/`; `scripts/bootstrap.sh` copies them to `/opt/nginx/conf.d/`.
+- App containers use **`infra_net`**; nginx uses Docker DNS (`resolver 127.0.0.11`).
 
 ---
 
-## 3. Nginx
+## 3. Nginx files (by repo)
 
-### 3.1 Production (server)
+| Repo | File | Domain | Upstream |
+|------|------|--------|----------|
+| **fundose-fe** | `deploy/nginx/fundose.in.conf` | fundose.in, www | `fundose-fe:3000` |
+| **fundose-fe** | `deploy/nginx/fundose.local.conf` | fundose.local | `fundose-fe-dev:3000` |
+| **fundose-backend** | `deploy/nginx/api.fundose.in.conf` | api.fundose.in | `fundose-backend:8000` |
+| **fundose-backend** | `deploy/nginx/api.fundose.local.conf` | api.fundose.local | `fundose-backend-dev:8000` |
 
-| File | Domain | Role |
-|------|--------|------|
-| `deploy/nginx/fundose.in.conf` | fundose.in, www → redirect | TLS + `set $fundose_be` / `$fundose_fe` + include snippet |
-| `deploy/nginx/_fundose-locations.conf` | (snippet) | Proxies Django API paths and Next.js |
-
-TLS paths assume Let’s Encrypt: `/etc/letsencrypt/live/fundose.in/`. Adjust `server_name` and cert paths if your domain differs.
-
-### 3.2 Local development
-
-| File | Domain | Upstream containers |
-|------|--------|---------------------|
-| `deploy/nginx/fundose.local.conf` | fundose.local | `fundose-backend-dev:8000`, `fundose-fe-dev:3000` |
-
-Add to `/etc/hosts` (or run `bash scripts/bootstrap.sh --dev`, which appends it):
-
-```
-127.0.0.1  fundose.local
-```
-
-### 3.3 Host paths (infra container mounts)
-
-Same convention as Crator:
-
-- Server configs: `/opt/nginx/conf.d/`
-- Snippets: `/opt/nginx/snippets/` (must map to `/etc/nginx/snippets/` inside the nginx container so `include /etc/nginx/snippets/_fundose-locations.conf` works)
+**Host install path:** `/opt/nginx/conf.d/` (mounted into the infra nginx container). No shared snippet: the API vhost is a single `location /` proxy.
 
 ---
 
-## 4. Volume and network
+## 4. Bootstrap (`scripts/bootstrap.sh`)
 
-| Name | Type | Created by |
-|------|------|------------|
-| `fundose-backend-postgres` | Docker volume (external in compose) | `scripts/bootstrap.sh` |
-| `infra_net` | Docker network (external) | `scripts/bootstrap.sh` |
-
-**Note:** If another project on the same host already created `infra_net`, bootstrap skips creation and reuses it.
-
----
-
-## 5. Bootstrap (`scripts/bootstrap.sh`)
-
-Single script: creates **`fundose-backend-postgres`** volume and **`infra_net`** if missing, ensures `/opt/nginx/snippets`, copies **`_fundose-locations.conf`** and the server conf (prod or dev), and with **`--dev`** appends **`fundose.local`** to `/etc/hosts` when needed.
+Creates **`fundose-backend-postgres`** and **`infra_net`** if missing, then copies **both** vhosts from the submodules.
 
 ```bash
-bash scripts/bootstrap.sh           # prod: fundose.in.conf + volume + network + snippet
-bash scripts/bootstrap.sh --dev   # dev: fundose.local.conf + hosts + volume + network + snippet
+bash scripts/bootstrap.sh           # fundose.in.conf + api.fundose.in.conf
+bash scripts/bootstrap.sh --dev     # *.local.conf + /etc/hosts (fundose.local, api.fundose.local)
 ```
+
+Re-run anytime to refresh nginx files after editing configs in the submodules.
 
 ---
 
-## 6. First-time setup
+## 5. TLS (Let’s Encrypt) — first time
 
-### 6.1 Backend environment
+**Important:** The **api** vhost references `/etc/letsencrypt/live/api.fundose.in/` before that cert exists. Issue **api** first using HTTP-only, then restore the full vhost.
 
-```bash
-cd fundose-backend
-cp .env.example .env
-# Set SECRET_KEY, ENC_KEY, DATABASE_URL, POSTGRES_*, DEBUG, etc.
-```
+1. **Temporary HTTP-only** for `api.fundose.in` (port 80 only, `/.well-known/acme-challenge/` → `/var/www/certbot`), then `nginx -t` && reload.
+2. **Certbot** (from `~/infra`, same stack as Crator):
 
-`ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS` are comma-separated lists (no spaces), overridable via `.env`.
+   ```bash
+   cd /home/deploy/infra
+   docker compose run --rm --entrypoint certbot certbot certonly \
+     --webroot -w /var/www/certbot -d api.fundose.in \
+     --agree-tos --non-interactive --register-unsafely-without-email
+   ```
 
-### 6.2 Local dev (summary)
+3. **`bash scripts/bootstrap.sh`** (from monorepo root) to copy the **full** `api.fundose.in.conf`, then reload nginx.
 
-```bash
-# From monorepo root
-bash scripts/bootstrap.sh --dev
-cd fundose-backend && cp -n .env.example .env && cd ..
-cd fundose-backend && docker compose -f docker-compose.dev.yml up --build -d && cd ..
-cd fundose-fe && docker compose -f docker-compose.dev.yml up --build -d && cd ..
-# Reload infra nginx: nginx -t && nginx -s reload
-# Open http://fundose.local
-```
+4. Repeat the same pattern for **fundose.in** if that cert is not present yet (separate cert).
 
-### 6.3 Production (summary)
-
-1. Issue TLS certs for `fundose.in` (e.g. certbot).
-2. `bash scripts/bootstrap.sh` on the server.
-3. Ensure infra nginx mounts `/opt/nginx` correctly.
-4. `fundose-backend`: `.env` with production secrets.
-5. `fundose-fe`: image built with `NEXT_PUBLIC_API_BASE_URL=""` (default in `docker-compose.yml`) so the browser calls same-origin paths (`/auth/`, …).
-6. `cd fundose-backend && docker compose up --build -d` then `cd fundose-fe && docker compose up --build -d`
-7. `nginx -t` && `nginx -s reload` on infra.
+**Cloudflare:** Ensure HTTP challenges reach origin (no rule that blocks `/.well-known/acme-challenge/` on the relevant host).
 
 ---
 
-## 7. Frontend API base URL
+## 6. Frontend API URL
 
-| Scenario | `NEXT_PUBLIC_API_BASE_URL` |
-|----------|----------------------------|
-| Same host as nginx (this stack) | `""` (empty) at **build** time |
-| Legacy `api.fundose.in` | `https://api.fundose.in` |
+| Environment | `NEXT_PUBLIC_API_BASE_URL` |
+|-------------|----------------------------|
+| Production compose | `https://api.fundose.in` (set in `fundose-fe/docker-compose.yml`) |
+| Dev compose | `http://api.fundose.local` |
 
-Unset at build time defaults to `https://api.fundose.in` in code for backward compatibility.
+Django **ALLOWED_HOSTS** / **CSRF_TRUSTED_ORIGINS** must include `api.fundose.in` (and local names for dev). See `fundose-backend/.env.example`.
 
 ---
 
-## 8. Quick reference
+## 7. Docker quick reference
 
 ```bash
-# Logs
-docker logs -f fundose-backend
-docker logs -f fundose-fe
-
-# Redeploy one service
 cd fundose-backend && docker compose up --build -d
 cd fundose-fe && docker compose up --build -d
 ```
 
----
-
-## 9. File index
-
-| Path | Description |
-|------|-------------|
-| `deploy/nginx/fundose.in.conf` | Production server block |
-| `deploy/nginx/fundose.local.conf` | Local HTTP server block |
-| `deploy/nginx/_fundose-locations.conf` | Shared `location` map |
-| `fundose-backend/Dockerfile` | Prod API image |
-| `fundose-backend/Dockerfile.dev` | Dev API image |
-| `fundose-backend/docker-compose*.yml` | DB + Redis + API |
-| `fundose-backend/scripts/entrypoint.sh` | Wait for Postgres → migrate → collectstatic |
-| `fundose-fe/Dockerfile` | Next standalone prod |
-| `fundose-fe/Dockerfile.dev` | Next dev server |
-| `scripts/bootstrap.sh` | Volume, `infra_net`, nginx file copies, optional `/etc/hosts` |
+Dev: `docker compose -f docker-compose.dev.yml up --build -d` in each repo.
 
 ---
 
-## 10. Backend changes for containers
+## 8. Volume and network
 
-- **Gunicorn + WhiteNoise** for production static files and WSGI serving.
-- **`ALLOWED_HOSTS` / `CSRF_TRUSTED_ORIGINS`** driven from `.env` (comma-separated) with sensible defaults including `fundose.local` and container names.
-- **`core/constants.py`**: Redis host/port from env; safe fallback if Redis is unreachable at startup.
+| Name | Created by |
+|------|------------|
+| `fundose-backend-postgres` | `scripts/bootstrap.sh` |
+| `infra_net` | `scripts/bootstrap.sh` |
 
 ---
 
